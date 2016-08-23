@@ -1,0 +1,145 @@
+#!/usr/bin/env python
+import argparse, re, sys
+
+REGISTER_OPCODES = {
+    "A": 0b111,
+    "B": 0b000,
+    "C": 0b001,
+    "D": 0b010,
+    "E": 0b011,
+    "H": 0b100,
+    "L": 0b101,
+}
+
+def to_bytes(l):
+    if hasattr(str, "encode") and hasattr(str, "decode"):
+        return b"".join(chr(x) for x in l)
+    return bytes(l)
+
+def parse_int(s):
+    # avoid octal literals
+    if re.match("0\d", s):
+        s = re.sub("0+", "", s)
+    return int(s, 0)
+
+def to_unsigned(type, i):
+    if type[0] == "u":
+        return i
+    if type[0] == "i":
+        w = int(type[1:])
+        return i % (1 << w)
+    assert False
+
+class Assembler(object):
+
+    def error(self, msg):
+        raise Exception("line {0}: {1}".format(self.row, msg))
+
+    def get_or_error(self, x, i, errmsg):
+        try:
+            return x[i];
+        except (IndexError, KeyError):
+            pass
+        self.error("{0}: {1}".format(errmsg, i))
+
+    def check_int_type(self, type, i, s):
+        w = int(type[1:])
+        if type[0] == "u":
+            if 0 <= i < (1 << w):
+                return type, i
+        elif type[0] == "i":
+            if -(1 << (w - 1)) <= i < (1 << (w - 1)):
+                return type, i
+        else:
+            assert False
+        self.error("Integer out of range: {0}".format(s))
+
+    def parse_int(self, s):
+        n = s
+
+        m = re.match("(.*)([iu]\d+)$", n)
+        if m:
+            n, t = m.groups()
+            if t[1:] not in ["8", "16"]:
+                self.error("Unsupported integer width: {0}".format(s))
+            i = parse_int(n)
+            return self.check_int_type(t, i, s)
+
+        i = 1
+        t = "u"
+
+        m = re.match("\+(.*)", n)
+        if m:
+            n, = m.groups()
+            t = "i"
+
+        else:
+            m = re.match("-(.*)", n)
+            if m:
+                n, = m.groups()
+                i = -1
+                t = "i"
+
+        i *= parse_int(n)
+
+        if n.startswith("0x"):
+            if len(n) == 2 + 2:
+                t += "8"
+            elif len(n) == 2 + 4:
+                t += "16"
+            else:
+                self.error("Unsupported integer width: {0}".format(s))
+        elif n.startswith("0b"):
+            if len(n) == 2 + 8:
+                t += "8"
+            elif len(n) == 2 + 16:
+                t += "16"
+            else:
+                self.error("Unsupported integer width: {0}".format(s))
+        elif not re.match("0\a", n):
+            self.error("Decimal literals must have type suffix: {0}".format(s))
+        else:
+            self.error("Unsupported integer literal: {0}".format(s))
+
+        return self.check_int_type(t, i, s)
+
+    def get_register_opcode(self, r):
+        return self.get_or_error(REGISTER_OPCODES, r.upper(),
+                                 "Invalid register")
+
+    def assemble_instruction(self, row, line):
+        self.row = row
+
+        line = re.sub("([;#]|//).*", "", line)
+        if not line.strip():
+            return
+
+        m = re.match("\s*(\w+)\s*<-\s*([+-]?\w+)\s*$", line)
+        if m:
+            dst, src = m.groups()
+
+            rdst = self.get_register_opcode(dst)
+            if re.match("^[\d+-]", src):
+                tsrc, isrc = self.parse_int(src)
+                if tsrc[1:] != "8":
+                    self.error("Operation does not support "
+                               "the given integer width: {0}".format(src))
+                return [0b00000110 | rdst << 3, to_unsigned(tsrc, isrc)]
+
+            else:
+                rsrc = self.get_register_opcode(src)
+                return [0b01000000 | rdst << 3 | rsrc]
+
+        self.error("Invalid instruction: {0}".format(line.strip()))
+
+p = argparse.ArgumentParser()
+p.add_argument("-o", dest="out_file", nargs="?", default="a.out")
+p.add_argument("in_file", nargs="?", default="-")
+args = vars(p.parse_args())
+in_file = sys.stdin if args["in_file"] == "-" else open(args["in_file"], "r")
+out_file = (sys.stdout if args["out_file"] == "-"
+            else open(args["out_file"], "wb"))
+with in_file as f:
+    assembler = Assembler()
+    for row, line in enumerate(f, 1):
+        out_file.write(to_bytes(assembler.assemble_instruction(row, line)))
